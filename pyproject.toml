@@ -1,0 +1,29 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "snipclip"
+version = "0.1.0"
+description = "AI-powered automatic video editing — engine does the hands, Claude does the brain"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.10"
+dependencies = [
+    "faster-whisper>=1.0.0",
+    "click>=8.0.0",
+    "rich>=13.0.0",
+    "ffmpeg-python>=0.2.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-mock>=3.0.0",
+]
+
+[project.scripts]
+snipclip = "snipclip.cli:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

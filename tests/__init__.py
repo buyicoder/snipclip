@@ -1,0 +1,1 @@
+# SnipClip test suite
