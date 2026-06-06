@@ -3,6 +3,7 @@
 Commands:
   snipclip probe <video>              Get video metadata as JSON
   snipclip transcribe <video>         Transcribe speech to text
+  snipclip report <path>             Generate segmented素材分析报告 for Claude
   snipclip cut <video> --keep <json>  Cut video by time segments
   snipclip subtitle <video> <transcript>  Generate subtitles
   snipclip index <path>              Index video material with visual analysis
@@ -397,3 +398,75 @@ def preview(path: Path, output: Path, cols: int, interval: float):
 
     size_kb = result.stat().st_size / 1024
     console.print(f"[green]Preview saved:[/green] {result} ({size_kb:.0f} KB)")
+
+
+@main.command()
+@click.argument("path", type=click.Path(exists=True, path_type=Path))
+@click.option(
+    "--output", "-o",
+    type=click.Path(path_type=Path),
+    default=Path("report.json"),
+    help="Output JSON path (default: report.json)",
+)
+@click.option(
+    "--segment-duration", "-s",
+    default=4.0,
+    help="Seconds per segment (default: 4.0)",
+)
+@click.option(
+    "--transcript", "-t",
+    type=click.Path(exists=True, path_type=Path),
+    default=None,
+    help="Transcript JSON from transcribe command",
+)
+def report(path: Path, output: Path, segment_duration: float, transcript: Optional[Path]):
+    """Generate a segmented analysis report for Claude Code.
+
+    Divides videos into uniform time segments, tags each with
+    visual metadata (quality, faces, scene type) and transcript text,
+    producing a structured JSON that Claude Code reads to create
+    an editing plan.
+
+    PATH can be a video file or directory of videos.
+    """
+    from snipclip.segment import generate_segment_report
+
+    # Collect video files
+    video_files: List[Path] = []
+    if path.is_dir():
+        for ext in ("*.mp4", "*.MP4", "*.mov", "*.MOV", "*.avi", "*.AVI"):
+            video_files.extend(sorted(path.glob(ext)))
+    else:
+        video_files = [path]
+
+    # Filter out generated files
+    SKIP_PREFIXES = ("merged", "vlog", "output", "index_")
+    video_files = [
+        vf for vf in video_files
+        if not any(vf.name.lower().startswith(pref) for pref in SKIP_PREFIXES)
+    ]
+    video_files = sorted(set(video_files))
+
+    def progress(current, total, filename):
+        console.print(f"  [{current}/{total}] {filename}")
+
+    with console.status(f"[bold]Generating segment report (每{segment_duration}秒一段)..."):
+        result = generate_segment_report(
+            video_files, output,
+            segment_duration=segment_duration,
+            transcript_path=transcript,
+            progress_callback=progress,
+        )
+
+    console.print(f"\n[green]Report saved:[/green] {output}")
+    console.print(f"Files: {result['total_files']}")
+    console.print(f"Total duration: {result['total_duration']:.0f}s = {result['total_duration']/60:.1f} min")
+    console.print(f"Segments: {result['total_segments']} (每段 {segment_duration}s)")
+    stats = result.get("stats", {})
+    if stats:
+        console.print(f"Avg quality: {stats.get('avg_quality', 0):.2f}")
+        console.print(f"Segments with faces: {stats.get('segments_with_faces', 0)}")
+        console.print(f"Segments with speech: {stats.get('segments_with_speech', 0)}")
+        top = stats.get("top_scenes", [])
+        if top:
+            console.print(f"Top scenes: {', '.join(s['label'] for s in top[:3])}")
