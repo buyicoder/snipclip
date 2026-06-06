@@ -150,31 +150,55 @@ def extract_preview_grid(
     import numpy as np
 
     frames: List[np.ndarray] = []
+    max_total_frames = 120  # hard cap for preview grid
+    max_per_video = max(1, max_total_frames // max(1, len(video_paths)))
 
     for vp in video_paths:
         cap = cv2.VideoCapture(str(vp))
         if not cap.isOpened():
+            cap.release()
             continue
         fps = cap.get(cv2.CAP_PROP_FPS)
+        total_frames = cap.get(cv2.CAP_PROP_FRAME_COUNT)
         if fps <= 0:
             fps = 30
-        step = int(fps * frame_interval)
-        frame_idx = step // 2  # start at middle of first interval
+        if total_frames <= 0:
+            total_frames = fps * 60  # assume 60s max
 
-        while True:
+        # Calculate step to get ~max_per_video frames
+        duration = total_frames / fps
+        if duration > 0:
+            actual_interval = max(frame_interval, duration / max_per_video)
+        else:
+            actual_interval = frame_interval
+        step = int(fps * actual_interval)
+        frame_idx = step // 2
+
+        frames_from_this = 0
+        while frames_from_this < max_per_video and len(frames) < max_total_frames:
+            if frame_idx >= total_frames:
+                break
             cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
             ret, frame = cap.read()
             if not ret:
                 break
-            # Resize to thumbnail
             h, w = frame.shape[:2]
-            thumb_w = 320
-            thumb_h = int(h * thumb_w / w)
-            thumb = cv2.resize(frame, (thumb_w, thumb_h))
+            # Resize to fixed size, preserving aspect ratio with letterbox
+            target_w, target_h = 320, 180
+            scale = min(target_w / w, target_h / h)
+            new_w, new_h = int(w * scale), int(h * scale)
+            resized = cv2.resize(frame, (new_w, new_h))
+            thumb = np.zeros((target_h, target_w, 3), dtype=np.uint8)
+            y_off = (target_h - new_h) // 2
+            x_off = (target_w - new_w) // 2
+            thumb[y_off:y_off + new_h, x_off:x_off + new_w] = resized
             frames.append(thumb)
+            frames_from_this += 1
             frame_idx += step
 
         cap.release()
+        if len(frames) >= max_total_frames:
+            break
 
     if not frames:
         raise RuntimeError("No frames could be extracted")
