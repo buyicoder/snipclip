@@ -52,6 +52,7 @@ def segment_video(
     output_dir: Path,
     segment_duration: float = 4.0,
     transcript: Optional[List[dict]] = None,
+    time_offset: float = 0.0,
 ) -> List[Segment]:
     """Divide a video into uniform segments and tag each one.
 
@@ -59,8 +60,8 @@ def segment_video(
         video_path: Source video file.
         output_dir: Directory for extracted frames.
         segment_duration: Duration of each segment in seconds (default 4s).
-        transcript: Optional list of transcript segments
-                    [{start, end, text, confidence}, ...].
+        transcript: Optional list of transcript segments (absolute timeline).
+        time_offset: This file's start time in the transcript timeline.
 
     Returns:
         List of Segment namedtuples, one per time slice.
@@ -70,10 +71,11 @@ def segment_video(
     output_dir.mkdir(parents=True, exist_ok=True)
     video_name = video_path.stem
 
-    # Get video duration
+    # Get video duration and display dimensions
     ffprobe = get_ffprobe_path()
     result = subprocess.run(
-        [str(ffprobe), "-v", "quiet", "-print_format", "json", "-show_format", str(video_path)],
+        [str(ffprobe), "-v", "quiet", "-print_format", "json",
+         "-show_format", "-show_streams", str(video_path)],
         capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30,
     )
     duration = 0.0
@@ -83,6 +85,15 @@ def segment_video(
 
     if duration <= 0:
         return []
+
+    # Get display dimensions (after rotation) for frame orientation fix
+    actual_dims = None
+    if result.returncode == 0:
+        streams = data.get("streams", [])
+        for s in streams:
+            if s.get("codec_type") == "video":
+                actual_dims = (s.get("width", 0), s.get("height", 0))
+                break
 
     # Calculate segment boundaries
     num_segments = max(1, int(duration / segment_duration))
@@ -101,13 +112,31 @@ def segment_video(
         frame_ok = False
         if not frame_path.exists():
             r = subprocess.run(
-                [str(ffmpeg), "-y", "-ss", str(midpoint), "-i", str(video_path),
-                 "-vframes", "1", "-q:v", "2", str(frame_path)],
+                [str(ffmpeg), "-y", "-ss", str(midpoint),
+                 "-i", str(video_path),
+                 "-vframes", "1", "-q:v", "2",
+                 str(frame_path)],
                 capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30,
             )
             frame_ok = (r.returncode == 0 and frame_path.exists())
         else:
             frame_ok = True
+
+        # Fix rotation: phone videos may have rotation metadata that
+        # ffprobe reads (reporting display_w x display_h) but FFmpeg
+        # single-frame extraction doesn't apply. Detect and fix.
+        if frame_ok and actual_dims and frame_path.exists():
+            try:
+                raw = imread(frame_path)
+                if raw is not None:
+                    fh, fw = raw.shape[:2]
+                    dw, dh = actual_dims
+                    # If frame dims are swapped vs probe display dims, rotate
+                    if (fw == dh and fh == dw) and fw != fh:
+                        corrected = cv2.rotate(raw, cv2.ROTATE_90_CLOCKWISE)
+                        cv2.imwrite(str(frame_path), corrected)
+            except Exception:
+                pass
 
         # Quality
         quality_overall = 0.5
@@ -142,12 +171,14 @@ def segment_video(
             except Exception:
                 pass
 
-        # Transcript
+        # Transcript — map from absolute timeline using time_offset
         seg_transcript = ""
         if transcript:
+            abs_start = start + time_offset
+            abs_end = end + time_offset
             seg_transcript = " ".join(
                 t["text"] for t in transcript
-                if max(t["start"], start) < min(t["end"], end)
+                if max(t["start"], abs_start) < min(t["end"], abs_end)
             )
 
         # Composite score: quality (40%) + faces (30%) + has_transcript (20%) + not_blurry (10%)
@@ -222,6 +253,7 @@ def generate_segment_report(
 
     all_segments = []
     total_duration = 0.0
+    cumulative_offset = 0.0  # track absolute time offset for transcript mapping
 
     for i, vp in enumerate(video_paths):
         if progress_callback:
@@ -231,6 +263,7 @@ def generate_segment_report(
             vp, frames_dir / vp.stem,
             segment_duration=segment_duration,
             transcript=transcript,
+            time_offset=cumulative_offset,
         )
         all_segments.extend(segs)
 
@@ -266,6 +299,8 @@ def generate_segment_report(
         except Exception:
             file_entry["duration"] = sum(s.duration for s in segs)
             total_duration += file_entry["duration"]
+
+        cumulative_offset += file_entry["duration"]
 
     if progress_callback:
         progress_callback(len(video_paths), len(video_paths), "done")

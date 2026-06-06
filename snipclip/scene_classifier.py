@@ -175,66 +175,124 @@ def _classify_clip(image_path: Path, labels: List[str]) -> Optional[List[SceneTa
 # ---- Heuristic Fallback ----
 
 def _classify_heuristic(image_path: Path) -> List[SceneTag]:
-    """Scene classification based on color and brightness analysis."""
+    """Scene classification based on multi-region visual feature analysis.
+
+    Uses: sky detection, green/blue pixel ratios, edge density,
+    regional brightness analysis, and aspect ratio.
+    """
     img = imread(image_path)
     if img is None:
         return [SceneTag(label="未知场景", confidence=0.0, source="heuristic")]
 
     hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     h, w = img.shape[:2]
 
-    # Split into regions for more nuanced analysis
-    center = hsv[h//4:3*h//4, w//4:3*w//4]  # center region
+    # ---- Region masks ----
+    sky_region = hsv[0:h//3, :]              # top third
+    ground_region = hsv[h//2:, :]             # bottom half
+    center_region = hsv[h//4:3*h//4, w//4:3*w//4]  # center
 
-    # Average color metrics
-    avg_brightness = float(np.mean(center[:, :, 2]))
-    avg_saturation = float(np.mean(center[:, :, 1]))
-    avg_hue = float(np.mean(center[:, :, 0]))
+    # ---- Brightness analysis ----
+    avg_brightness = float(np.mean(center_region[:, :, 2]))
+    sky_brightness = float(np.mean(sky_region[:, :, 2]))
+    ground_brightness = float(np.mean(ground_region[:, :, 2]))
 
+    # ---- Color ratios ----
+    # Green ratio (nature/foliage): hue 35-85, saturation > 40
+    hue = ground_region[:, :, 0]
+    sat = ground_region[:, :, 1]
+    green_mask = (hue > 35) & (hue < 85) & (sat > 40)
+    green_ratio = float(np.mean(green_mask))
+
+    # Blue ratio (water/sky): hue 90-130, saturation > 30
+    blue_mask = (hue > 90) & (hue < 130) & (sat > 30)
+    blue_ratio = float(np.mean(blue_mask))
+
+    # Warm ratio (skin/indoor/food): hue < 20 or hue > 160, saturation > 40
+    warm_mask = ((hue < 20) | (hue > 160)) & (sat > 40)
+    warm_ratio = float(np.mean(warm_mask))
+
+    # ---- Edge density (texture complexity) ----
+    edges = cv2.Canny(gray, 50, 150)
+    edge_density = float(np.mean(edges > 0))
+
+    # ---- Sky detection ----
+    sky_sat = float(np.mean(sky_region[:, :, 1]))
+    is_sky = sky_brightness > 140 and sky_sat < 40
+
+    # ---- Dark region detection ----
+    dark_ratio = float(np.mean(gray < 40))
+
+    # ---- Build scores from features ----
     scores: dict[str, float] = {}
 
-    # Darkness → night/indoor/tunnel
-    if avg_brightness < 60:
+    # Cave/tunnel: very dark overall OR large dark region + low edge density
+    if dark_ratio > 0.5:
+        scores["隧道/洞穴"] = min(dark_ratio + 0.2, 1.0)
+    elif dark_ratio > 0.2 and avg_brightness < 80:
+        scores["隧道/洞穴"] = 0.7
+        scores["夜景/暗光"] = 0.5
+
+    # Night scene: dark but some bright spots
+    if avg_brightness < 50 and dark_ratio < 0.5:
         scores["夜景/暗光"] = 0.8
-        scores["隧道/洞穴"] = 0.5
-    elif avg_brightness < 100:
-        scores["室内/房间"] = 0.7
-        scores["隧道/洞穴"] = 0.6
-        scores["餐厅/吃饭"] = 0.4
-    else:
-        scores["户外自然风光"] = 0.6
+        scores["室内/房间"] = 0.4
 
-        # Hue analysis
-        if 35 < avg_hue < 85:
-            scores["户外自然风光"] = 0.85  # green
-            scores["山景"] = 0.7
-        elif 90 < avg_hue < 130:
-            scores["海边/水边"] = 0.8  # blue
-        elif avg_saturation < 30:
-            scores["城市街景"] = 0.6
-            scores["车内/驾驶"] = 0.4
+    # Indoor: moderate brightness, low edge density, low sky, warm tones
+    if 40 < avg_brightness < 120 and not is_sky and warm_ratio > 0.15:
+        scores["室内/房间"] = warm_ratio + 0.3
+        if warm_ratio > 0.3:
+            scores["餐厅/吃饭"] = 0.6
 
-    # Warm tones → restaurant/indoor
-    if avg_hue < 20 and avg_saturation > 50:
-        scores["餐厅/吃饭"] = max(scores.get("餐厅/吃饭", 0), 0.7)
-        scores["室内/房间"] = max(scores.get("室内/房间", 0), 0.6)
+    # Outdoor natural: sky + green + moderate-high brightness
+    if is_sky and green_ratio > 0.15:
+        scores["户外自然风光"] = 0.6 + green_ratio * 0.4
+        if green_ratio > 0.3:
+            scores["山景"] = 0.5 + green_ratio * 0.4
 
-    # High saturation green → nature/outdoor
-    if avg_hue > 40 and avg_hue < 80 and avg_saturation > 60:
-        scores["山景"] = 0.8
-        scores["户外自然风光"] = 0.9
+    # Water scene: blue dominant + high sky brightness + low edge density
+    if blue_ratio > 0.2 and is_sky and edge_density < 0.15:
+        scores["海边/水边"] = 0.5 + blue_ratio * 0.4
 
-    # Very bright + blue → water/sky
-    if avg_brightness > 150 and avg_hue > 100:
-        scores["海边/水边"] = 0.7
+    # Mountain: high edge density + green + sky
+    if edge_density > 0.15 and green_ratio > 0.2 and is_sky:
+        scores["山景"] = 0.5 + edge_density
 
-    # Portrait aspect shots → selfie/portrait
-    if h > w * 1.3:
-        scores["特写/自拍"] = 0.7
+    # Urban: low green, low blue, moderate edge, gray-ish
+    avg_sat = float(np.mean(center_region[:, :, 1]))
+    if avg_sat < 25 and is_sky and green_ratio < 0.1 and blue_ratio < 0.1:
+        scores["城市街景"] = 0.6
 
-    # Build result
+    # Selfie/close-up: high warm ratio in center + cool edges (bokeh-like)
+    center_warm = float(np.mean(warm_mask[h//3:2*h//3, w//3:2*w//3]))
+    edge_warm = float(np.mean(np.concatenate([
+        warm_mask[0:h//4, :].flatten(), warm_mask[-h//4:, :].flatten(),
+        warm_mask[:, 0:w//4].flatten(), warm_mask[:, -w//4:].flatten(),
+    ])))
+    if center_warm > 0.4 and edge_warm < 0.2:
+        scores["特写/自拍"] = 0.6
+
+    # Driving/in-car: dark borders + bright center + low edge density
+    border = np.concatenate([
+        gray[0:h//8, :].flatten(),
+        gray[-h//8:, :].flatten(),
+        gray[:, 0:w//8].flatten(),
+        gray[:, -w//8:].flatten(),
+    ])
+    border_dark = float(np.mean(border < 50))
+    center_bright = float(np.mean(gray[h//3:2*h//3, w//3:2*w//3] > 100))
+    if border_dark > 0.6 and center_bright > 0.4:
+        scores["车内/驾驶"] = 0.7
+
+    # Fallback for bright outdoor without specific features
+    if not scores and avg_brightness > 120 and is_sky:
+        scores["户外自然风光"] = 0.5
+
+    # Build result sorted by confidence
     tags = sorted(
-        [SceneTag(label=k, confidence=round(v, 3), source="heuristic") for k, v in scores.items()],
+        [SceneTag(label=k, confidence=round(min(v, 1.0), 3), source="heuristic")
+         for k, v in scores.items()],
         key=lambda t: t.confidence,
         reverse=True,
     )
@@ -242,4 +300,4 @@ def _classify_heuristic(image_path: Path) -> List[SceneTag]:
     if not tags:
         tags = [SceneTag(label="普通场景", confidence=0.5, source="heuristic")]
 
-    return tags[:3]  # top 3
+    return tags[:3]
