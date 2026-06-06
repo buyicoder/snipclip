@@ -154,11 +154,10 @@ def _classify_clip(image_path: Path, labels: List[str]) -> Optional[List[SceneTa
         img_features = vis_sess.run(None, vis_input)[0]
         img_features = img_features / np.linalg.norm(img_features, axis=1, keepdims=True)
 
-        # ---- Text embedding ----
+        # ---- Text embedding (ONNX model only needs input_ids) ----
         text_inputs = tokenizer(labels, padding=True, truncation=True, return_tensors="np")
         txt_out = txt_sess.run(None, {
             "input_ids": text_inputs["input_ids"].astype(np.int64),
-            "attention_mask": text_inputs["attention_mask"].astype(np.int64),
         })
         text_features = txt_out[0]  # [pooler_output]
         text_features = text_features / np.linalg.norm(text_features, axis=1, keepdims=True)
