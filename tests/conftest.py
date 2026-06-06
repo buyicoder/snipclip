@@ -1,9 +1,30 @@
 """Shared test fixtures for SnipClip."""
 
+import shutil
 from pathlib import Path
 import pytest
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
+
+
+def _ffmpeg_available() -> bool:
+    """Check if FFmpeg is installed and functional."""
+    return shutil.which("ffmpeg") is not None
+
+
+def _ffprobe_available() -> bool:
+    """Check if FFprobe is installed and functional."""
+    return shutil.which("ffprobe") is not None
+
+
+ffmpeg_required = pytest.mark.skipif(
+    not _ffmpeg_available(),
+    reason="FFmpeg not installed. Run: snipclip setup",
+)
+ffprobe_required = pytest.mark.skipif(
+    not _ffprobe_available(),
+    reason="FFprobe not installed. Run: snipclip setup",
+)
 
 
 @pytest.fixture(scope="session")

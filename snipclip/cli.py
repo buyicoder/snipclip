@@ -1,0 +1,314 @@
+"""SnipClip CLI — video processing commands.
+
+Commands:
+  snipclip probe <video>              Get video metadata as JSON
+  snipclip transcribe <video>         Transcribe speech to text
+  snipclip cut <video> --keep <json>  Cut video by time segments
+  snipclip subtitle <video> <transcript>  Generate subtitles
+  snipclip setup                      Download FFmpeg locally
+"""
+
+import hashlib
+import json
+import sys
+from pathlib import Path
+from typing import Optional
+
+import click
+from rich.console import Console
+from rich.table import Table
+
+from snipclip import __version__
+from snipclip.probe import probe_video
+from snipclip.extractor import extract_audio
+from snipclip.transcriber import transcribe, Segment as TransSegment
+from snipclip.cutter import cut_video, TimeRange
+from snipclip.subtitler import generate_srt, burn_subtitles, Segment as SubSegment
+
+console = Console()
+
+
+def _load_segments(path: Path) -> list[TimeRange]:
+    """Load time segments from a JSON file.
+
+    Expected format: [{"start": 0.0, "end": 1.0}, ...]
+    """
+    data = json.loads(path.read_text())
+    if not isinstance(data, list):
+        raise click.BadParameter(f"Segments file must be a JSON array")
+    segments = []
+    for item in data:
+        if not isinstance(item, dict) or "start" not in item or "end" not in item:
+            raise click.BadParameter(f"Each segment must have 'start' and 'end': {item}")
+        segments.append(TimeRange(start=float(item["start"]), end=float(item["end"])))
+    return segments
+
+
+def _save_segments(segments: list[TransSegment], path: Path) -> None:
+    """Save transcript segments to JSON."""
+    data = [
+        {
+            "start": s.start,
+            "end": s.end,
+            "text": s.text,
+            "confidence": s.confidence,
+        }
+        for s in segments
+    ]
+    path.write_text(json.dumps(data, indent=2, ensure_ascii=False))
+
+
+@click.group()
+@click.version_option(version=__version__)
+def main():
+    """SnipClip — AI-powered automatic video editing engine.
+
+    Engine does the hands, Claude does the brain.
+    """
+    pass
+
+
+@main.command()
+@click.argument("video", type=click.Path(exists=True, path_type=Path))
+def probe(video: Path):
+    """Get video metadata as JSON."""
+    info = probe_video(video)
+    console.print_json(json.dumps(info._asdict()))
+
+
+@main.command()
+@click.argument("video", type=click.Path(exists=True, path_type=Path))
+@click.option(
+    "--output", "-o",
+    type=click.Path(path_type=Path),
+    help="Output path for transcript JSON. Default: <video>_transcript.json",
+)
+@click.option(
+    "--model", "-m",
+    default="large-v3",
+    help="Whisper model size (default: large-v3)",
+)
+@click.option(
+    "--device", "-d",
+    default=None,
+    help="Compute device: cpu or cuda (auto-detect if not set)",
+)
+@click.option(
+    "--language", "-l",
+    default=None,
+    help="Language code, e.g. en, zh (auto-detect if not set)",
+)
+@click.option(
+    "--cache-dir",
+    type=click.Path(path_type=Path),
+    help="Cache directory for intermediate files. Default: ~/.snipclip/cache/",
+)
+def transcribe_cmd(
+    video: Path,
+    output: Optional[Path],
+    model: str,
+    device: Optional[str],
+    language: Optional[str],
+    cache_dir: Optional[Path],
+):
+    """Transcribe video speech to text with timestamps.
+
+    Extracts audio, runs Whisper transcription, outputs JSON with
+    start/end/text/confidence per segment.
+    """
+    if cache_dir is None:
+        video_hash = hashlib.md5(video.as_posix().encode()).hexdigest()[:12]
+        cache_dir = Path.home() / ".snipclip" / "cache" / video_hash
+    cache_dir.mkdir(parents=True, exist_ok=True)
+
+    if output is None:
+        output = Path.cwd() / f"{video.stem}_transcript.json"
+
+    # Step 1: Extract audio
+    audio_path = cache_dir / "audio.wav"
+    with console.status(f"[bold]Extracting audio from {video.name}..."):
+        extract_audio(video, audio_path)
+    console.print(f"[green]Audio extracted:[/green] {audio_path}")
+
+    # Step 2: Transcribe
+    with console.status(f"[bold]Transcribing with {model} ({device or 'auto'})..."):
+        segments = transcribe(
+            audio_path,
+            model_size=model,
+            device=device,
+            language=language,
+        )
+    console.print(f"[green]Transcription complete:[/green] {len(segments)} segments")
+
+    # Step 3: Save
+    _save_segments(segments, output)
+    console.print(f"[green]Transcript saved:[/green] {output}")
+
+    # Summary table
+    if segments:
+        table = Table(title="Transcript Preview")
+        table.add_column("#", style="dim")
+        table.add_column("Start")
+        table.add_column("End")
+        table.add_column("Text")
+        for i, seg in enumerate(segments[:10], 1):
+            table.add_row(
+                str(i),
+                f"{seg.start:.1f}s",
+                f"{seg.end:.1f}s",
+                seg.text[:80] + ("..." if len(seg.text) > 80 else ""),
+            )
+        console.print(table)
+        if len(segments) > 10:
+            console.print(f"  ... and {len(segments) - 10} more segments")
+
+
+@main.command()
+@click.argument("video", type=click.Path(exists=True, path_type=Path))
+@click.option(
+    "--keep", "-k",
+    type=click.Path(exists=True, path_type=Path),
+    help="JSON file with segments to KEEP",
+)
+@click.option(
+    "--remove", "-r",
+    type=click.Path(exists=True, path_type=Path),
+    help="JSON file with segments to REMOVE",
+)
+@click.option(
+    "--output", "-o",
+    type=click.Path(path_type=Path),
+    help="Output video path. Default: <video>_cut.mp4",
+)
+def cut(
+    video: Path,
+    keep: Optional[Path],
+    remove: Optional[Path],
+    output: Optional[Path],
+):
+    """Cut video by time segments.
+
+    Use --keep to retain only specified segments.
+    Use --remove to delete specified segments, keep the rest.
+    One of --keep or --remove is required.
+    """
+    if keep is None and remove is None:
+        raise click.UsageError("Either --keep or --remove is required")
+
+    if keep is not None and remove is not None:
+        raise click.UsageError("Use --keep or --remove, not both")
+
+    segments_file = keep if keep else remove
+    mode = "keep" if keep else "remove"
+    segments = _load_segments(segments_file)
+
+    if output is None:
+        suffix = "_cut.mp4"
+        output = video.parent / f"{video.stem}{suffix}"
+
+    # Calculate what we're doing
+    total_keep = sum(s.duration for s in segments)
+
+    with console.status(f"[bold]Cutting video ({mode} mode)..."):
+        cut_video(video, segments, output, mode=mode)
+
+    console.print(f"[green]Video saved:[/green] {output}")
+    console.print(f"Mode: {mode} | Segments: {len(segments)} | "
+                  f"Total kept: {total_keep:.1f}s")
+
+
+@main.command()
+@click.argument("video", type=click.Path(exists=True, path_type=Path))
+@click.argument("transcript", type=click.Path(exists=True, path_type=Path))
+@click.option("--burn", is_flag=True, help="Burn subtitles into video")
+@click.option(
+    "--output", "-o",
+    type=click.Path(path_type=Path),
+    help="Output path (SRT file or burned video)",
+)
+@click.option("--font-size", default=24, help="Subtitle font size (burn mode)")
+def subtitle(
+    video: Path,
+    transcript: Path,
+    burn: bool,
+    output: Optional[Path],
+    font_size: int,
+):
+    """Generate SRT subtitles or burn them into video.
+
+    TRANSCRIPT is a JSON file from the 'transcribe' command.
+    """
+    # Load segments
+    data = json.loads(transcript.read_text())
+    segments = [
+        SubSegment(
+            start=float(s["start"]),
+            end=float(s["end"]),
+            text=s["text"],
+            confidence=float(s.get("confidence", 1.0)),
+        )
+        for s in data
+    ]
+
+    if burn:
+        if output is None:
+            output = video.parent / f"{video.stem}_subtitled.mp4"
+        with console.status("[bold]Burning subtitles..."):
+            burn_subtitles(video, segments, output, font_size=font_size)
+        console.print(f"[green]Burned video saved:[/green] {output}")
+    else:
+        if output is None:
+            output = Path.cwd() / f"{video.stem}.srt"
+        generate_srt(segments, output)
+        console.print(f"[green]SRT saved:[/green] {output}")
+
+
+@main.command()
+def setup():
+    """Download FFmpeg to ~/.snipclip/bin/ for local use."""
+    import platform
+    import urllib.request
+    import zipfile
+    import tarfile
+    import tempfile
+
+    system = platform.system()
+    machine = platform.machine()
+
+    console.print(f"[bold]Setting up FFmpeg for {system} ({machine})...")
+
+    # Determine download URL based on platform
+    if system == "Windows":
+        url = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
+        archive_type = "zip"
+    elif system == "Darwin":
+        url = "https://evermeet.cx/ffmpeg/getrelease/ffmpeg/zip"
+        archive_type = "zip"
+    elif system == "Linux":
+        url = "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz"
+        archive_type = "tar.xz"
+    else:
+        console.print(f"[red]Unsupported platform: {system}")
+        console.print("Please install FFmpeg manually: https://ffmpeg.org/download.html")
+        sys.exit(1)
+
+    dest_dir = Path.home() / ".snipclip" / "bin"
+    dest_dir.mkdir(parents=True, exist_ok=True)
+
+    with console.status(f"[bold]Downloading FFmpeg..."):
+        with tempfile.NamedTemporaryFile(suffix=f".{archive_type.replace('.', '_')}") as tmp:
+            urllib.request.urlretrieve(url, tmp.name)
+
+            # Extract
+            if archive_type == "zip":
+                with zipfile.ZipFile(tmp.name, "r") as zf:
+                    for member in zf.namelist():
+                        name = Path(member).name.lower()
+                        if name in ("ffmpeg.exe", "ffprobe.exe", "ffmpeg", "ffprobe"):
+                            target = dest_dir / Path(member).name
+                            with zf.open(member) as src, open(target, "wb") as dst:
+                                dst.write(src.read())
+                            console.print(f"  Extracted: {target.name}")
+
+    console.print(f"\n[green]FFmpeg installed to {dest_dir}")
+    console.print("Make sure this directory is in your PATH, or the engine will auto-discover it.")
