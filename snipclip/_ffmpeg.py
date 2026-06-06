@@ -84,6 +84,8 @@ def check_ffmpeg(ffmpeg_path: Path) -> bool:
             [str(ffmpeg_path), "-version"],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=10,
         )
         return result.returncode == 0
@@ -98,6 +100,8 @@ def check_ffprobe(ffprobe_path: Path) -> bool:
             [str(ffprobe_path), "-version"],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=10,
         )
         return result.returncode == 0
