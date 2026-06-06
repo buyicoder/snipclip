@@ -1,6 +1,6 @@
 ---
 name: snipclip
-description: AI-powered automatic video editing. Give raw footage and direction — get a finished video. Claude acts as editing director, SnipClip engine executes the cuts.
+description: 自动视频剪辑 — 给素材和大方向，AI 直接出成品。Whisper 转写，Claude 剪决策，FFmpeg 执行，支持 CPU/GPU。
 category: media
 ---
 

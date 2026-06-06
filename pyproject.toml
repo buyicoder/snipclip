@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "snipclip"
 version = "0.1.0"
-description = "AI-powered automatic video editing — engine does the hands, Claude does the brain"
+description = "自动视频剪辑工具 — 给素材和方向，AI 自动出成品。Whisper 转写，Claude 动脑，FFmpeg 动手。"
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.10"
