@@ -66,99 +66,104 @@ def classify_frame(
 
 # ---- CLIP (ONNX) Implementation ----
 
-_clip_model: Optional = None
+_vision_session: Optional = None
+_text_session: Optional = None
 _clip_tokenizer: Optional = None
+_clip_loaded: bool = False  # True if we tried loading (success or failure)
 
 
 def _load_clip():
-    """Try to load ONNX CLIP model. Returns (session, tokenizer) or (None, None)."""
-    global _clip_model, _clip_tokenizer
+    """Load ONNX CLIP vision + text models. Returns (vis_sess, txt_sess, tok) or (None, None, None)."""
+    global _vision_session, _text_session, _clip_tokenizer, _clip_loaded
 
-    if _clip_model is not None:
-        return _clip_model, _clip_tokenizer
+    if _clip_loaded:
+        return _vision_session, _text_session, _clip_tokenizer
+
+    _clip_loaded = True
 
     try:
         import onnxruntime as ort
 
         model_dir = Path.home() / ".snipclip" / "models" / "clip-vit-b32"
-        model_path = model_dir / "model.onnx"
+        vis_path = model_dir / "onnx" / "vision_model_quantized.onnx"
+        txt_path = model_dir / "onnx" / "text_model_quantized.onnx"
 
-        if not model_path.exists():
-            return None, None
+        if not vis_path.exists() or not txt_path.exists():
+            return None, None, None
 
-        session = ort.InferenceSession(str(model_path), providers=["CPUExecutionProvider"])
+        _vision_session = ort.InferenceSession(str(vis_path), providers=["CPUExecutionProvider"])
+        _text_session = ort.InferenceSession(str(txt_path), providers=["CPUExecutionProvider"])
 
-        # Load tokenizer (simple BPE) if available
-        tokenizer_path = model_dir / "tokenizer.json"
-        tokenizer = None
-        if tokenizer_path.exists():
-            try:
-                from transformers import CLIPTokenizerFast
-                tokenizer = CLIPTokenizerFast.from_pretrained(str(model_dir))
-            except ImportError:
-                pass
+        try:
+            from transformers import CLIPTokenizerFast
+            _clip_tokenizer = CLIPTokenizerFast.from_pretrained(str(model_dir))
+        except ImportError:
+            pass
 
-        _clip_model = session
-        _clip_tokenizer = tokenizer
-        return session, tokenizer
+        return _vision_session, _text_session, _clip_tokenizer
 
     except Exception:
-        return None, None
+        return None, None, None
 
 
 def download_clip_model() -> Path:
-    """Download CLIP-ViT-B-32 ONNX model from HuggingFace.
+    """Download CLIP-ViT-B-32 ONNX model from HuggingFace to ~/.snipclip/models/."""
+    from huggingface_hub import snapshot_download
 
-    Requires `transformers` for the tokenizer.
-    """
     model_dir = Path.home() / ".snipclip" / "models" / "clip-vit-b32"
-    model_path = model_dir / "model.onnx"
+    vis_path = model_dir / "onnx" / "vision_model_quantized.onnx"
 
-    if model_path.exists():
+    if vis_path.exists():
         return model_dir
 
-    print("CLIP model not found. To enable scene classification, download:")
-    print("  https://huggingface.co/Xenova/clip-vit-base-patch32")
-    print(f"  and place ONNX files in: {model_dir}")
-    print()
-    print("Scene classification will use color heuristic instead.")
+    model_dir.mkdir(parents=True, exist_ok=True)
+    print(f"Downloading CLIP model to {model_dir}...")
+    print("(~600MB, may take a few minutes)")
+
+    snapshot_download(
+        "Xenova/clip-vit-base-patch32",
+        local_dir=str(model_dir),
+        local_dir_use_symlinks=False,
+        ignore_patterns=["*.bin", "*.safetensors", "*.msgpack", "*.h5"],
+    )
+
+    print("CLIP model ready.")
     return model_dir
 
 
 def _classify_clip(image_path: Path, labels: List[str]) -> Optional[List[SceneTag]]:
-    """Classify using ONNX CLIP. Returns None if model not available."""
-    session, tokenizer = _load_clip()
-    if session is None:
+    """Classify using ONNX CLIP (separate vision + text encoders). Returns None if model unavailable."""
+    vis_sess, txt_sess, tokenizer = _load_clip()
+    if vis_sess is None or txt_sess is None or tokenizer is None:
         return None
 
     try:
-        # Load and preprocess image
         from PIL import Image
 
+        # ---- Image preprocessing (CLIP-ViT-B-32) ----
         img = Image.open(str(image_path)).convert("RGB")
         img = img.resize((224, 224))
         img_array = np.array(img).astype(np.float32) / 255.0
-        img_array = (img_array - np.array([0.48145466, 0.4578275, 0.40821073])) / np.array([0.26862954, 0.26130258, 0.27577711])
+        mean = np.array([0.48145466, 0.4578275, 0.40821073], dtype=np.float32)
+        std = np.array([0.26862954, 0.26130258, 0.27577711], dtype=np.float32)
+        img_array = (img_array - mean) / std
         img_array = img_array.transpose(2, 0, 1)[np.newaxis, :]  # [1, 3, 224, 224]
 
-        # Run image encoder
-        img_input = {session.get_inputs()[0].name: img_array}
-        img_features = session.run(None, img_input)[0]
+        # ---- Image embedding ----
+        vis_input = {vis_sess.get_inputs()[0].name: img_array}
+        img_features = vis_sess.run(None, vis_input)[0]
         img_features = img_features / np.linalg.norm(img_features, axis=1, keepdims=True)
 
-        if tokenizer is None:
-            return None
-
-        # Tokenize text labels
+        # ---- Text embedding ----
         text_inputs = tokenizer(labels, padding=True, truncation=True, return_tensors="np")
-        text_out = session.run(None, {
-            session.get_inputs()[1].name: text_inputs["input_ids"],
-            session.get_inputs()[2].name: text_inputs["attention_mask"],
+        txt_out = txt_sess.run(None, {
+            "input_ids": text_inputs["input_ids"].astype(np.int64),
+            "attention_mask": text_inputs["attention_mask"].astype(np.int64),
         })
-        text_features = text_out[0]
+        text_features = txt_out[0]  # [pooler_output]
         text_features = text_features / np.linalg.norm(text_features, axis=1, keepdims=True)
 
-        # Cosine similarity
+        # ---- Cosine similarity ----
         similarities = np.dot(img_features, text_features.T)[0]
 
         tags = []

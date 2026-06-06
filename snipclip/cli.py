@@ -8,6 +8,7 @@ Commands:
   snipclip subtitle <video> <transcript>  Generate subtitles
   snipclip index <path>              Index video material with visual analysis
   snipclip preview <path>            Generate thumbnail preview grid
+  snipclip models download <model>   Download ML models (clip, yolo)
   snipclip setup                      Download FFmpeg locally
 """
 
@@ -264,6 +265,35 @@ def subtitle(
             output = Path.cwd() / f"{video.stem}.srt"
         generate_srt(segments, output)
         console.print(f"[green]SRT saved:[/green] {output}")
+
+
+@main.group()
+def models():
+    """Manage downloadable ML models."""
+    pass
+
+
+@models.command("download")
+@click.argument("model_name", type=str)
+def models_download(model_name: str):
+    """Download an ML model for local use.
+
+    Available models: clip, yolo
+    """
+    if model_name.lower() == "clip":
+        from snipclip.scene_classifier import download_clip_model
+        with console.status("[bold]Downloading CLIP model (~600MB)..."):
+            path = download_clip_model()
+        console.print(f"[green]CLIP model ready:[/green] {path}")
+        console.print("Restart SnipClip to use CLIP-based scene classification.")
+    elif model_name.lower() == "yolo":
+        from snipclip.detector import download_yolo_model
+        with console.status("[bold]Downloading YOLOv8-nano model (~6MB)..."):
+            path = download_yolo_model()
+        console.print(f"[green]YOLO model ready:[/green] {path}")
+    else:
+        console.print(f"[red]Unknown model: {model_name}[/red]")
+        console.print("Available: clip, yolo")
 
 
 @main.command()
