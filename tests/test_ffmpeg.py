@@ -58,11 +58,15 @@ class TestGetPaths:
         mock_find = mocker.patch.object(
             mod, "find_ffmpeg", return_value=Path("/bin/ffmpeg")
         )
-        result1 = get_ffmpeg_path()
-        result2 = get_ffmpeg_path()
-        assert result1 == Path("/bin/ffmpeg")
-        assert result2 == Path("/bin/ffmpeg")
-        mock_find.assert_called_once()  # cached on second call
+        try:
+            result1 = get_ffmpeg_path()
+            result2 = get_ffmpeg_path()
+            assert result1 == Path("/bin/ffmpeg")
+            assert result2 == Path("/bin/ffmpeg")
+            mock_find.assert_called_once()  # cached on second call
+        finally:
+            # Reset global cache to avoid polluting other tests
+            mod._ffmpeg_path = None
 
 
 class TestCheckFfmpeg:
