@@ -285,9 +285,62 @@ def _classify_heuristic(image_path: Path) -> List[SceneTag]:
     if border_dark > 0.6 and center_bright > 0.4:
         scores["车内/驾驶"] = 0.7
 
-    # Fallback for bright outdoor without specific features
-    if not scores and avg_brightness > 120 and is_sky:
-        scores["户外自然风光"] = 0.5
+    # ---- Texture analysis (Sobel edge density) ----
+    sobel_x = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
+    sobel_y = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
+    texture = np.sqrt(sobel_x**2 + sobel_y**2)
+    texture_mean = float(np.mean(texture))
+    texture_var = float(np.var(texture))
+
+    # ---- Broader classification tiers (before fallback) ----
+
+    # Natural outdoor: green or sky, moderate to bright
+    if not scores and avg_brightness > 100:
+        if green_ratio > 0.1:
+            scores["户外自然风光"] = 0.4 + green_ratio * 0.4
+        elif is_sky:
+            scores["户外自然风光"] = 0.45
+        elif blue_ratio > 0.1:
+            scores["海边/水边"] = 0.4 + blue_ratio * 0.3
+
+    # Water scene: smooth (low texture) + blue + bright
+    if not scores and blue_ratio > 0.1 and texture_var < 100 and avg_brightness > 80:
+        scores["海边/水边"] = 0.5 + blue_ratio * 0.3
+
+    # Indoor: moderate brightness, moderate texture, not sky
+    if not scores and 50 < avg_brightness < 130 and not is_sky:
+        if warm_ratio > 0.1:
+            scores["室内/房间"] = 0.4 + warm_ratio * 0.3
+        elif edge_density < 0.1:
+            scores["室内/房间"] = 0.45
+        else:
+            scores["室内/房间"] = 0.35
+
+    # Mountain/forest: high texture + green
+    if not scores and green_ratio > 0.1 and texture_var > 200:
+        scores["山景"] = 0.45 + green_ratio * 0.3
+
+    # Urban: moderate texture, low saturation, not green/blue
+    if not scores and edge_density > 0.05 and avg_sat < 30 and green_ratio < 0.1 and blue_ratio < 0.1:
+        scores["城市街景"] = 0.4
+
+    # Night/dark
+    if not scores and avg_brightness < 50:
+        if dark_ratio > 0.3:
+            scores["夜景/暗光"] = 0.5 + dark_ratio * 0.3
+        else:
+            scores["夜景/暗光"] = 0.4
+
+    # Final fallback: if we know nothing, use brightness + texture to guess
+    if not scores:
+        if avg_brightness > 120 and texture_var > 100:
+            scores["户外自然风光"] = 0.35
+        elif avg_brightness > 120:
+            scores["户外自然风光"] = 0.3
+        elif avg_brightness > 60:
+            scores["室内/房间"] = 0.3
+        else:
+            scores["夜景/暗光"] = 0.3
 
     # Build result sorted by confidence
     tags = sorted(
