@@ -39,6 +39,7 @@ class Segment(NamedTuple):
     faces: int
     people_count: int
     scene_tags: List[str]   # top 2 scene labels
+    scene_source: str        # "clip" or "heuristic"
 
     # Audio tags
     transcript: str          # speech in this segment (empty if none)
@@ -164,10 +165,19 @@ def segment_video(
 
         # Scene tags
         scene_labels: List[str] = []
+        scene_source = "heuristic"  # default
         if frame_ok:
             try:
                 tags = classify_frame(frame_path)
-                scene_labels = [t.label for t in tags[:2] if t.confidence > 0.4]
+                # CLIP scores are relative (0.2-0.3 range), take top 2 regardless
+                # Heuristic scores are absolute (0-1 range), filter low confidence
+                is_clip = any(t.source == "clip" for t in tags)
+                if is_clip:
+                    scene_labels = [t.label for t in tags[:2]]
+                    scene_source = "clip"
+                else:
+                    scene_labels = [t.label for t in tags[:2] if t.confidence > 0.4]
+                    scene_source = "heuristic"
             except Exception:
                 pass
 
@@ -206,6 +216,7 @@ def segment_video(
             faces=faces,
             people_count=people_count,
             scene_tags=scene_labels,
+            scene_source=scene_source,
             transcript=seg_transcript,
             score=score,
         ))
@@ -281,6 +292,7 @@ def generate_segment_report(
                     "faces": s.faces,
                     "people_count": s.people_count,
                     "scene_tags": s.scene_tags,
+                    "scene_source": s.scene_source,
                     "transcript": s.transcript,
                     "score": s.score,
                     "frame": str(s.frame_path) if s.frame_path else None,
