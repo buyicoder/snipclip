@@ -5,6 +5,8 @@ Commands:
   snipclip transcribe <video>         Transcribe speech to text
   snipclip cut <video> --keep <json>  Cut video by time segments
   snipclip subtitle <video> <transcript>  Generate subtitles
+  snipclip index <path>              Index video material with visual analysis
+  snipclip preview <path>            Generate thumbnail preview grid
   snipclip setup                      Download FFmpeg locally
 """
 
@@ -12,7 +14,7 @@ import hashlib
 import json
 import sys
 from pathlib import Path
-from typing import Optional
+from typing import Optional, List
 
 import click
 from rich.console import Console
@@ -312,3 +314,86 @@ def setup():
 
     console.print(f"\n[green]FFmpeg installed to {dest_dir}")
     console.print("Make sure this directory is in your PATH, or the engine will auto-discover it.")
+
+
+@main.command()
+@click.argument("path", type=click.Path(exists=True, path_type=Path))
+@click.option(
+    "--output", "-o",
+    type=click.Path(path_type=Path),
+    default=Path("index.json"),
+    help="Output JSON path (default: index.json)",
+)
+@click.option(
+    "--threshold", "-t",
+    default=0.3,
+    help="Scene change sensitivity 0.0-1.0 (default: 0.3)",
+)
+@click.option(
+    "--max-frames", "-m",
+    default=30,
+    help="Max keyframes per video (default: 30)",
+)
+def index(path: Path, output: Path, threshold: float, max_frames: int):
+    """Index video material with visual analysis.
+
+    Extracts keyframes, scores quality, detects faces/objects,
+    classifies scenes, and outputs a structured JSON index.
+
+    PATH can be a video file or directory of videos.
+    """
+    from snipclip.indexer import index_material
+
+    paths = [path]
+
+    def progress(current, total, filename):
+        console.print(f"  [{current}/{total}] {filename}")
+
+    with console.status("[bold]Indexing video material..."):
+        result = index_material(
+            paths, output,
+            scene_threshold=threshold,
+            max_keyframes_per_file=max_frames,
+            progress_callback=progress,
+        )
+
+    console.print(f"\n[green]Index saved:[/green] {output}")
+    console.print(f"Files: {result['total_files']}")
+    console.print(f"Total duration: {result['total_duration']:.0f}s = {result['total_duration']/60:.1f} min")
+    total_kfs = sum(len(f["keyframes"]) for f in result["files"])
+    console.print(f"Keyframes extracted: {total_kfs}")
+
+
+@main.command()
+@click.argument("path", type=click.Path(exists=True, path_type=Path))
+@click.option(
+    "--output", "-o",
+    type=click.Path(path_type=Path),
+    default=Path("preview.jpg"),
+    help="Output image path (default: preview.jpg)",
+)
+@click.option(
+    "--cols", "-c",
+    default=4,
+    help="Number of columns in the grid (default: 4)",
+)
+@click.option(
+    "--interval", "-i",
+    default=2.0,
+    help="Seconds between extracted frames (default: 2.0)",
+)
+def preview(path: Path, output: Path, cols: int, interval: float):
+    """Generate a thumbnail preview grid from video files.
+
+    Extracts frames at regular intervals and arranges them in a grid.
+    Useful for quickly scanning video content.
+
+    PATH can be a video file or directory of videos.
+    """
+    from snipclip.indexer import generate_preview
+
+    with console.status("[bold]Generating preview grid..."):
+        result = generate_preview([path], output, cols=cols, interval=interval)
+
+    size_kb = result.stat().st_size / 1024
+    console.print(f"[green]Preview saved:[/green] {result} ({size_kb:.0f} KB)")
